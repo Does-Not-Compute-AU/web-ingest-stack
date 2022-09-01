@@ -1,0 +1,189 @@
+version: '3.6'
+
+networks:
+
+  # external facing ingress network
+  # only services that need ingress via traefik should connect here
+  net-public:
+    name: net-public
+    #external: true # Un-comment this if you want to run on docker swarm
+
+  # net-internal private network, for services that do not require public ingress
+  net-internal:
+    name: net-internal
+    #driver: overlay # Un-comment this if you want to run on docker swarm
+
+volumes:
+
+  # essentials
+  pgdata:
+  redisdata:
+  elasticdata:
+
+  # non-essentials
+  traefik_letsencrypt:
+  pgadmindata:
+  metabasedata:
+  supersetdata:
+  
+services:
+
+# Essential, the container you came here for =)
+  webingest:
+    image: doesnotcomputeau/web-ingest:latest
+    networks:
+      - net-public
+      - net-internal
+    depends_on:
+      - pg
+      - redis
+    ports:
+      - 5000:80 # recommended to remove this and use traefik reverse proxy
+    environment:
+      TZ: ${TIMEZONE}
+      DATA_SCHEMA_NAME: ${DATA_SCHEMA_NAME}
+      ADMIN_USERNAME: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      JWTSECURITYKEY: ${JWTSECURITYKEY}
+      JWTISSUER: ${JWTISSUER}
+      JWTAUDIENCE: ${JWTAUDIENCE}
+      JWTEXPIRYINDAYS: ${JWTEXPIRYINDAYS}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      PG_STORE_DATA: ${PG_STORE_DATA}
+      PG_DB: ${PG_DB}
+      PG_SU_UNAME: ${PG_SU_UNAME}
+      PG_SU_PASS: ${PG_SU_PASS}
+      PG_HOST: ${PG_HOST}
+      PG_PORT: ${PG_PORT}
+      PG_SU_EMAIL: ${PG_SU_EMAIL}
+      ELASTIC_STORE_DATA: ${ELASTIC_STORE_DATA}
+      ELASTIC_USER: ${ELASTIC_USER}
+      ELASTIC_PASS: ${ELASTIC_PASS}
+      ELASTIC_HOSTS: ${ELASTIC_HOSTS}
+
+# Mandatory, at least for storing webingest configuration. 
+# Can optionally store ingested data with PG_STORE_DATA env variable set to true.
+  pg:
+    image: postgres
+    networks:
+      - net-internal
+    restart: always
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    environment:
+      TZ: ${TIMEZONE}
+      POSTGRES_USER: ${PG_SU_UNAME}
+      POSTGRES_PASSWORD: ${PG_SU_PASS}
+      POSTGRES_DB: ${PG_DB}
+
+# Mandatory, operates as distributed messagebus for background-task scheduler (Hangfire). 
+  redis:
+    image: bitnami/redis
+    networks:
+      - net-internal
+    environment:
+      TZ: ${TIMEZONE}
+      ALLOW_EMPTY_PASSWORD: 'yes'
+      REDIS_AOF_ENABLED: 'no'
+    volumes:
+      - redisdata:/bitnami/redis/data
+    restart: always
+#    command: [sh, -c, "rm -f /data/dump.rdb && redis-server"]  # disable persistence
+
+# Optional, but strongly encouraged. Very flexible entity storage.
+  elastic:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.4.1
+    networks:
+      - net-public
+      - net-internal
+    environment:
+      ELASTIC_USERNAME: ${ELASTIC_USER}
+      ELASTIC_PASSWORD: ${ELASTIC_PASS}
+      xpack.security.enabled: 'true'
+      bootstrap.memory_lock: 'true'
+      discovery.type: 'single-node'
+      ES_JAVA_OPTS: '-Xms512m -Xmx4096m'
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - elasticdata:/usr/share/elasticsearch/data
+
+# Optional, but strongly encouraged. Very flexible reports & management for Elasticsearch service.
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.4.1
+    depends_on:
+      - elastic
+    networks:
+      - net-public
+      - net-internal
+    environment:
+      server.publicBaseUrl: 'https://kibana.${STACK_ROOT_DOMAIN}'
+      SERVER_NAME: 'kibana.${STACK_ROOT_DOMAIN}'
+      ELASTICSEARCH_HOSTS: '["http://elastic:9200"]'
+      ELASTICSEARCH_USERNAME: ${ELASTIC_USER}
+      ELASTICSEARCH_PASSWORD: ${ELASTIC_PASS}
+
+# Optional, runs N number of TOR instances as HTTP proxies, to configure the HTTP client in webingest to route through
+  rotatingproxy:
+    image: mattes/rotating-proxy
+    networks:
+      - net-public
+      - net-internal
+    environment:
+      TZ: ${TIMEZONE}
+      tors: 50
+
+# Optional, exposes data ingested into DB as a GraphQL endpoint
+  postgraphile:
+    image: graphile/postgraphile
+    networks:
+      - net-public
+      - net-internal
+    environment:
+      TZ: ${TIMEZONE}
+    depends_on:
+      - pg
+      - webingest
+    command: --connection postgres://${PG_SU_UNAME}:${PG_SU_PASS}@pg:5432/${PG_DB} --schema ${DATA_SCHEMA_NAME} --watch --enhance-graphiql --dynamic-json
+
+# Optional, DB-admin tool for PostgreSQL
+  pgadmin:
+    image: dpage/pgadmin4
+    networks:
+      - net-public
+      - net-internal
+    restart: unless-stopped
+    volumes:
+      - pgadmindata:/var/lib/pgadmin
+    environment:
+      TZ: ${TIMEZONE}
+      PGADMIN_DEFAULT_EMAIL: ${PG_SU_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PG_SU_PASS}
+
+# Optional, beginner-friendly Analytics/BI tool for presenting data stored in PostgreSQL (and most other RDBMS)
+  metabase:
+    image: metabase/metabase
+    networks:
+      - net-public
+      - net-internal
+    restart: unless-stopped
+    volumes:
+      - metabasedata:/tmp
+    environment:
+      TZ: ${TIMEZONE}
+      MB_DB_FILE: /tmp/metabase.db
+
+# Optional, highly advanced Analytics/BI tool. DYOR
+  superset:
+    image: apache/superset
+    networks:
+      - net-public
+      - net-internal
+    environment:
+      TZ: ${TIMEZONE}
+    restart: unless-stopped
+    volumes:
+      - supersetdata:/app/superset
