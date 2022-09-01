@@ -13,3 +13,9 @@ git clone https://github.com/does-not-compute-au/web-ingest-stack.git && cd web-
 ```
 
 Browse to http://localhost:5000
+
+Default login credentials:
+```
+admin@webingest.com.au
+Password123
+```
